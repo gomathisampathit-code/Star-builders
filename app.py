@@ -97,6 +97,12 @@ with st.sidebar:
 tab_e, tab_a, tab_r, tab_s = st.tabs(["📋 Entries", "➕ Add / Edit", "📊 Reports", "⚙️ Sites & Excel"])
 ents = core.load_entries(site["id"]) if site else []
 ai = core.adv_info(ents)
+if admin:
+    all_e = core.load_entries()
+    xl_all = core.export_workbook(all_e, site_list)
+    xl_site = core.export_workbook(ents, [site]) if site else None
+    csv_site = core.entries_csv(ents) if site else None
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 # ---------------------------------------------------------------- entries
 with tab_e:
@@ -108,6 +114,11 @@ with tab_e:
         c1.metric("Site advance given", inr(T["given"]))
         c2.metric("Total spent", inr(T["spent"]))
         c3.metric("Advance balance", inr(T["balance"]))
+        if admin:
+            d1, d2, d3 = st.columns(3)
+            d1.download_button("⬇ Excel – this site", xl_site, file_name=f"{site['name']}.xlsx", mime=XLSX, key="dl_site_e")
+            d2.download_button("⬇ Excel – all sites", xl_all, file_name="Star_Builders_P_L_Report.xlsx", mime=XLSX, key="dl_all_e")
+            d3.download_button("⬇ CSV – this site", csv_site, file_name=f"{site['name']}.csv", mime="text/csv", key="dl_csv_e")
         q = st.text_input("Search", placeholder="item, person, description…").strip().lower()
         h = []
         for e in sorted(ents, key=lambda e: (e["date"] or "", e["id"]), reverse=True):
@@ -201,6 +212,7 @@ with tab_a:
         brs = []
         if kind == "Site advance":
             st.markdown("**Break-up of this advance (how it was spent)**")
+            st.caption("To add a line, click the empty “+” row at the bottom of the table and fill Date, Item, Nos, Amount and Paid to. To remove a line, tick its row at the left and press Delete. Then press Save entry.")
             cols = ["Date", "Item", "Nos", "Amount", "Paid to"]
             if cur and cur["br"]:
                 base = pd.DataFrame([[pd.Timestamp(to_date(b["date"])), b["cat"], b["nos"], b["amount"], b["paid_to"]]
@@ -335,31 +347,27 @@ with tab_s:
             except ValueError as ex:
                 st.error(str(ex))
 
-    st.subheader("Import Excel")
-    st.caption("Every sheet becomes a site and the headings are matched automatically. "
-               "Rows already in the app are skipped, so importing the same file twice is safe.")
-    up = st.file_uploader("Excel file (.xlsx)", type=["xlsx"])
-    if up and st.button("Import this file", type="primary"):
-        try:
-            for r in core.import_workbook(up):
-                st.write(f"**{r['sheet']}** – added {r['added']}, skipped {r['skipped']} {r['note']}")
-        except Exception as ex:  # unreadable file
-            st.error(f"Could not read that file: {ex}")
-
     if admin:
+        st.subheader("Import Excel (admin)")
+        st.caption("Every sheet becomes a site and the headings are matched automatically. "
+                   "Rows already in the app are skipped, so importing the same file twice is safe.")
+        up = st.file_uploader("Excel file (.xlsx)", type=["xlsx"])
+        if up and st.button("Import this file", type="primary"):
+            try:
+                for r in core.import_workbook(up):
+                    st.write(f"**{r['sheet']}** – added {r['added']}, skipped {r['skipped']} {r['note']}")
+            except Exception as ex:  # unreadable file
+                st.error(f"Could not read that file: {ex}")
+
         st.subheader("Export (admin)")
-        all_e = core.load_entries()
-        st.download_button("⬇ Export all sites to Excel", core.export_workbook(all_e, site_list),
-                           file_name="Star_Builders_P_L_Report.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("⬇ Export all sites to Excel", xl_all, file_name="Star_Builders_P_L_Report.xlsx", mime=XLSX, key="dl_all_s")
         if site:
-            st.download_button(f"⬇ Export “{site['name']}” only", core.export_workbook(
-                [e for e in all_e if e["site_id"] == site["id"]], [site]), file_name=f"{site['name']}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button(f"⬇ Export “{site['name']}” to Excel", xl_site, file_name=f"{site['name']}.xlsx", mime=XLSX, key="dl_site_s")
+            st.download_button(f"⬇ Export “{site['name']}” as CSV", csv_site, file_name=f"{site['name']}.csv", mime="text/csv", key="dl_csv_s")
             with st.expander("Delete this site"):
                 st.warning(f"“{site['name']}” and its {len(ents)} entries will be deleted permanently.")
                 if st.checkbox("Yes, delete this site") and st.button("🗑 Delete site"):
                     core.delete_site(site["id"])
                     st.rerun()
     else:
-        st.caption("Export and deleting a site need the admin login (sidebar).")
+        st.caption("Import, export and deleting a site need the admin login (sidebar).")

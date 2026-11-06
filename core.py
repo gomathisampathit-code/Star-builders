@@ -395,49 +395,72 @@ def _to_date(v):
 
 
 def export_workbook(entries, site_list):
-    """One sheet per site in the same layout as the original P&L Excel, plus a Summary sheet."""
+    """One sheet per site in the layout of the original P&L Excel (+ Summary sheet).
+    Break-up lines sit directly under their Site Advance. Advance and Balance have their own columns;
+    break-up amounts are counted in the Amount total. A summary block under the Total row splits it up."""
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
     used = set()
     summary = [["Site", "Advance", "Total spent", "Balance"]]
+    f_adv = PatternFill("solid", fgColor="DCEBF7")
+    f_brk = PatternFill("solid", fgColor="E8F3EC")
+    f_pa = PatternFill("solid", fgColor="FBE3B0")
     for s in site_list:
         ents = [e for e in entries if e["site_id"] == s["id"]]
+        ai = adv_info(ents)
         ws = wb.create_sheet(_safe_title(s["name"], used))
         ws["A1"] = s["name"]
         ws["A1"].font = Font(bold=True, size=14)
         ws.append(HEAD)
         _style_header(ws, 2, len(HEAD))
-        bal, nos_total = 0.0, 0.0
+        bal, nos_total, normal, brk = {}, 0.0, 0.0, 0.0
+        fills = {}
+
+        def put(row, fill=None, bold=False):
+            ws.append(row)
+            if fill or bold:
+                for cell in ws[ws.max_row]:
+                    if fill:
+                        cell.fill = fill
+                    if bold:
+                        cell.font = Font(bold=True)
+
         for e in sorted(ents, key=lambda e: (e["date"] or "", e["id"])):
+            nos_total += _num(e["nos"])
             if e["advance"]:
-                ai = adv_info(ents)[e["id"]]
-                bal += e["advance"]
+                who = (e["paid_to"] or "").strip().lower()
+                bal[who] = bal.get(who, 0.0) + e["advance"]
+                i = ai[e["id"]]
                 note = e["description"] or ""
-                if ai["has"]:
-                    note += (" · " if note else "") + f"Prev. balance {ai['carry']:g} carried, total {ai['avail']:g}"
-                ws.append([_to_date(e["date"]), e["cat"] or "Site Advance", note or None, _num(e["nos"]) or e["nos"] or None,
-                           e["paid_to"] or None, None, e["advance"], bal])
-                nos_total += _num(e["nos"])
+                if i["has"]:
+                    note += (" · " if note else "") + f"Previous balance {i['carry']:g} carried forward"
+                put([_to_date(e["date"]), e["cat"] or "Site Advance", note or None, _num(e["nos"]) or e["nos"] or None,
+                     e["paid_to"] or None, None, e["advance"], bal[who]], f_adv, True)
                 for b in sorted(e["br"], key=lambda b: (b["date"] or "", b["id"])):
-                    bal -= b["amount"]
+                    bal[who] -= b["amount"]
+                    brk += b["amount"]
                     nos_total += _num(b["nos"])
-                    ws.append([_to_date(b["date"] or e["date"]), b["cat"] or None, "From site advance",
-                               _num(b["nos"]) or b["nos"] or None, b["paid_to"] or e["paid_to"] or None,
-                               b["amount"], None, bal])
+                    put([_to_date(b["date"] or e["date"]), b["cat"] or None, "   ↳ break-up of site advance",
+                         _num(b["nos"]) or b["nos"] or None, b["paid_to"] or e["paid_to"] or None,
+                         b["amount"], None, bal[who]], f_brk)
             else:
-                nos_total += _num(e["nos"])
-                ws.append([_to_date(e["date"]), e["cat"] or None, e["description"] or None,
-                           _num(e["nos"]) or e["nos"] or None, e["paid_to"] or None, e["amount"] or None, None, None])
+                normal += e["amount"]
+                put([_to_date(e["date"]), e["cat"] or None, e["description"] or None, _num(e["nos"]) or e["nos"] or None,
+                     e["paid_to"] or None, e["amount"] or None, None, None], f_pa if is_personal(e["cat"]) else None)
         t = totals(ents)
         ws.append([])
-        ws.append(["Total", None, None, nos_total or None, None, t["spent"], t["given"], t["balance"]])
-        for c in ws[ws.max_row]:
-            c.font = Font(bold=True)
+        put(["Total", None, None, nos_total or None, None, t["spent"], t["given"], t["balance"]], bold=True)
+        ws.append([])
+        put(["Summary"], bold=True)
+        for label, val in [("Normal expenses", normal), ("Site advance break-up (included in total)", brk),
+                           ("Total spent", t["spent"]), ("Site advance given", t["given"]),
+                           ("Advance balance", t["balance"])]:
+            ws.append([label, None, None, None, None, val])
         for row in ws.iter_rows(min_row=3):
             row[0].number_format = "dd-mmm-yy"
-            for c in row[5:8]:
-                c.number_format = "#,##0"
-        for i, w in enumerate([12, 22, 26, 7, 30, 13, 12, 13], 1):
+            for c_ in row[5:8]:
+                c_.number_format = "#,##0"
+        for i, w in enumerate([12, 22, 30, 7, 30, 13, 12, 13], 1):
             ws.column_dimensions[get_column_letter(i)].width = w
         ws.freeze_panes = "A3"
         summary.append([s["name"], t["given"], t["spent"], t["balance"]])
@@ -449,13 +472,33 @@ def export_workbook(entries, site_list):
         ws.append(r)
     _style_header(ws, 1, 4)
     for row in ws.iter_rows(min_row=2):
-        for c in row[1:]:
-            c.number_format = "#,##0"
+        for c_ in row[1:]:
+            c_.number_format = "#,##0"
     for i, w in enumerate([22, 14, 14, 14], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def entries_csv(entries):
+    """Flat CSV (opens in Excel): every payment, break-up lines included, with the advance balance."""
+    rows, bal = [], {}
+    for e in sorted(entries, key=lambda e: (e["site"], e["date"] or "", e["id"])):
+        key = (e["site_id"], (e["paid_to"] or "").strip().lower())
+        if e["advance"]:
+            bal[key] = bal.get(key, 0.0) + e["advance"]
+            rows.append([e["site"], fd(e["date"]), "Site advance", e["cat"] or "Site Advance", e["description"],
+                         e["nos"], e["paid_to"], None, e["advance"], bal[key]])
+            for b in sorted(e["br"], key=lambda b: (b["date"] or "", b["id"])):
+                bal[key] -= b["amount"]
+                rows.append([e["site"], fd(b["date"] or e["date"]), "Break-up", b["cat"], "From site advance", b["nos"],
+                             b["paid_to"] or e["paid_to"], b["amount"], None, bal[key]])
+        else:
+            rows.append([e["site"], fd(e["date"]), "Personal advance" if is_personal(e["cat"]) else "Expense", e["cat"],
+                         e["description"], e["nos"], e["paid_to"], e["amount"], None, None])
+    cols = ["Site", "Date", "Type", "Paid for", "Description", "Nos", "Paid To", "Amount (₹)", "Advance", "Balance"]
+    return pd.DataFrame(rows, columns=cols).to_csv(index=False).encode("utf-8-sig")
 
 
 def report_workbook(tabs, meta):
